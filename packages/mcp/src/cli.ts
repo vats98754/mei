@@ -16,25 +16,22 @@ import { parseArgs } from "node:util";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { serve } from "./server.js";
 
-const USAGE = `mei: an agent wallet that buys prepaid Visa/Mastercard cards through Bitrefill
+const USAGE = `mei: an agent wallet that buys gift cards through Bitrefill
 
 Usage:
-  mei init [--rpc <url>]                   create the agent wallet and print its address
-  mei status                               show the wallet balance, policy and 24h spend
-  mei policy [key=value ...]               show or change spending policy
-  mei cardholder [key=value ...]           show or set the cardholder (first_name, last_name, …)
-  mei serve                                run the MCP server on stdio
+  mei init [--rpc <url>]        create the agent wallet and print its address
+  mei status                    show the wallet balance, policy and 24h spend
+  mei policy [key=value ...]    show or change spending policy  mei serve                     run the MCP server on stdio
 
 Environment:
-  MEI_HOME           state directory (default ~/.mei)
-  MEI_PASSPHRASE     encrypts the agent key at rest (recommended)
-  BITREFILL_API_KEY  from https://www.bitrefill.com/account/developers (needed to buy)`;
+  MEI_HOME        state directory (default ~/.mei)
+  MEI_PASSPHRASE  encrypts the agent key at rest (recommended)`;
 
 // Secrets live in mei/.env (gitignored); real environment variables take precedence.
 const ENV_FILE = fileURLToPath(new URL("../../../.env", import.meta.url));
 if (existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
 
-const POLICY_AMOUNTS =["maxPerPurchase", "maxPerDay", "approvalAbove"] as const;
+const POLICY_AMOUNTS = ["maxPerPurchase", "maxPerDay", "approvalAbove"] as const;
 
 function init(args: string[]) {
   const { values } = parseArgs({ args, options: { rpc: { type: "string" } } });
@@ -57,12 +54,10 @@ function init(args: string[]) {
   store.writeConfig({
     rpcUrl: values.rpc ?? existing?.rpcUrl,
     policy: existing?.policy ?? DEFAULT_POLICY,
-    cardholder: existing?.cardholder,
   });
 
   console.log(`\nFund it by sending USDC on Base to:\n  ${address}`);
   console.log("No ETH is needed: payments are gasless USDC authorizations.");
-  console.log("\nThen run `mei cardholder first_name=… last_name=…` and set BITREFILL_API_KEY.");
 }
 
 async function status() {
@@ -76,8 +71,6 @@ async function status() {
   console.log(`Balance      ${formatUsdc(usdc)} USDC`);
   console.log(`Policy       ${JSON.stringify(config.policy)}`);
   console.log(`Spent (24h)  ${formatUsdc(spent)} USDC`);
-  console.log(`Cardholder   ${config.cardholder ? `${config.cardholder.first_name ?? "?"} ${config.cardholder.last_name ?? "?"}` : "not set"}`);
-  console.log(`Bitrefill    ${process.env.BITREFILL_API_KEY ? "API key set" : "BITREFILL_API_KEY not set"}`);
 }
 
 function keyValues(args: string[]): [string, string][] {
@@ -104,18 +97,6 @@ function policy(args: string[]) {
   console.log(JSON.stringify(next, null, 2));
 }
 
-function cardholder(args: string[]) {
-  const store = new Store();
-  const config = store.requireConfig();
-  const next = { ...config.cardholder };
-  for (const [key, value] of keyValues(args)) {
-    if (value) next[key] = value;
-    else delete next[key];
-  }
-  if (args.length) store.writeConfig({ ...config, cardholder: next });
-  console.log(JSON.stringify(next, null, 2));
-}
-
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
@@ -125,8 +106,6 @@ async function main() {
       return status();
     case "policy":
       return policy(args);
-    case "cardholder":
-      return cardholder(args);
     case "serve":
       return serve();
     default:

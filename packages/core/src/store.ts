@@ -8,11 +8,6 @@ import { DEFAULT_POLICY, type Policy, type SpendRecord } from "./policy.js";
 export interface MeiConfig {
   rpcUrl?: string;
   policy: Policy;
-  /**
-   * Fields for Bitrefill's prepaid-card form: first_name and last_name at minimum,
-   * plus anything else the form asks for. Printed on the card as the cardholder.
-   */
-  cardholder?: Record<string, string>;
 }
 
 /** Redemption codes are never written here; they are re-fetched from Bitrefill on demand. */

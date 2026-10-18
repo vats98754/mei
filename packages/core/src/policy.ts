@@ -2,7 +2,7 @@ import { formatUsdc, parseUsdc } from "./usdc.js";
 
 /**
  * Local spending rules, enforced before any money moves. These sit on top of the
- * on-chain spend permission, which is the hard cap the agent cannot exceed.
+ * agent wallet's USDC balance, which is the hard cap the agent cannot exceed.
  * Amounts are decimal USD strings.
  */
 export interface Policy {
