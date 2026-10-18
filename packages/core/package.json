@@ -1,0 +1,27 @@
+{
+  "name": "@mei/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@base-org/account": "2.5.13",
+    "@x402/core": "2.28.0",
+    "@x402/evm": "2.28.0",
+    "@x402/extensions": "2.28.0",
+    "@x402/fetch": "2.28.0",
+    "viem": "2.57.7"
+  }
+}

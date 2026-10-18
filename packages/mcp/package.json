@@ -1,0 +1,20 @@
+{
+  "name": "@mei/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "mei": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mei/core": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "viem": "2.57.7",
+    "zod": "3.25.76"
+  }
+}
