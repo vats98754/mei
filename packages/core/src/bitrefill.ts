@@ -1,260 +1,176 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ExactEvmScheme } from "@x402/evm";
-import { createSIWxPayload, encodeSIWxHeader } from "@x402/extensions/sign-in-with-x";
 import { wrapFetchWithPaymentFromConfig } from "@x402/fetch";
 import { isAddressEqual, type Address, type LocalAccount } from "viem";
-import { NETWORKS } from "./chain.js";
+import { BASE_CAIP2, USDC_BASE } from "./chain.js";
 
 /**
- * Client for Bitrefill's wallet-only x402 API: no Bitrefill account, the agent's
- * wallet signs in with SIWX and pays invoices in USDC on Base.
- * https://docs.cdp.coinbase.com/coinbase-for-agents/wallet-mcp/plugins/bitrefill
+ * Bitrefill's account MCP server. US prepaid Visa/Mastercard need a cardholder
+ * "prepayment" form, which only this API accepts; the wallet-only /x402 storefront
+ * rejects them. The account only creates orders: the agent wallet pays each
+ * invoice's x402_payment_url itself, so no balance is ever held at Bitrefill.
+ * https://docs.bitrefill.com/docs/ecommerce-mcp
  */
-export const BITREFILL_API = "https://api.bitrefill.com";
+export const BITREFILL_MCP = "https://api.bitrefill.com/mcp";
 export const BITREFILL_PAY_TO: Address = "0x480CD46E6faDe651a0437DeaddA53D5c8e7D846A";
-const BASE_CAIP2 = "eip155:8453";
-const SIWX = "sign-in-with-x";
-
-export interface ProductSummary {
-  slug: string;
-  name: string;
-  countries: string[];
-  currency: string;
-  in_stock: boolean;
-  categories: string[];
-  type?: string;
-}
-
-export interface SearchResult {
-  products: ProductSummary[];
-  found: number;
-  page: number;
-  per_page: number;
-}
-
-export interface ProductPackage {
-  package_value: string;
-  package_currency: string;
-  payment_price: string;
-  payment_currency: string;
-}
-
-export interface ProductDetail {
-  id: string;
-  name: string;
-  country_code: string;
-  currency: string;
-  in_stock: boolean;
-  categories: string[];
-  packages: ProductPackage[];
-  range?: { min: number; max: number; step: number; currency: string; note?: string };
-  recipient_required: boolean;
-  /** Present on "bill payment" products, which x402 does not sell. */
-  prepayment?: unknown;
-  instructions?: string;
-}
-
-export interface InvoiceItem {
-  product_id: string;
-  package_value: string;
-  refill_input?: string;
-}
-
-export interface Invoice {
-  invoice_id: string;
-  /** Atomic USDC units. */
-  price_usdc: string;
-  price_usd: number;
-  expires_in_minutes: number;
-}
-
-export interface RedemptionInfo {
-  code?: string;
-  pin?: string;
-  link?: string;
-  instructions?: string;
-  expiration_date?: string;
-  extra_fields?: Record<string, unknown>;
-  [key: string]: unknown;
-}
-
-export interface InvoiceStatus {
-  status?: string;
-  delivery_status?: string;
-  redemption_info?: { orders?: { product_id?: string; redemption_info?: RedemptionInfo }[] };
-  [key: string]: unknown;
-}
 
 export class BitrefillError extends Error {
   constructor(
-    readonly httpStatus: number,
-    readonly code: string | undefined,
-    readonly agentInstructions: string | undefined,
+    readonly tool: string,
     message: string,
+    readonly detail?: unknown,
   ) {
     super(message);
     this.name = "BitrefillError";
   }
 }
 
-async function errorFrom(res: Response): Promise<BitrefillError> {
-  const text = await res.text();
-  let body: { error_code?: string; agent_instructions?: string; error?: string } = {};
+/** The subset of Bitrefill's MCP tools mei uses; tool results are parsed JSON. */
+export interface BitrefillApi {
+  call(tool: string, args: Record<string, unknown>): Promise<Record<string, unknown>>;
+}
+
+function parseToolText(text: string): Record<string, unknown> {
   try {
-    body = JSON.parse(text);
-  } catch {}
-  const detail = body.agent_instructions ?? body.error ?? text.slice(0, 300);
-  return new BitrefillError(
-    res.status,
-    body.error_code,
-    body.agent_instructions,
-    `Bitrefill ${res.status}${body.error_code ? ` ${body.error_code}` : ""}: ${detail}`,
+    const value = JSON.parse(text);
+    return typeof value === "object" && value !== null ? value : { value };
+  } catch {
+    return { text };
+  }
+}
+
+export class BitrefillMcp implements BitrefillApi {
+  private client?: Promise<Client>;
+
+  constructor(
+    private readonly apiKey: string,
+    private readonly baseUrl = BITREFILL_MCP,
+  ) {}
+
+  private connect(): Promise<Client> {
+    this.client ??= (async () => {
+      const client = new Client({ name: "mei", version: "0.2.0" });
+      const url = new URL(`${this.baseUrl}/${encodeURIComponent(this.apiKey)}`);
+      await client.connect(new StreamableHTTPClientTransport(url));
+      return client;
+    })().catch((err) => {
+      this.client = undefined;
+      throw new BitrefillError("connect", `Could not connect to Bitrefill MCP: ${(err as Error).message}`);
+    });
+    return this.client;
+  }
+
+  async call(tool: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const client = await this.connect();
+    const result = await client.callTool({ name: tool, arguments: args });
+    const content = (result.content ?? []) as { type: string; text?: string }[];
+    const text = content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text ?? "")
+      .join("\n");
+    const body = parseToolText(text);
+    if (result.isError) throw new BitrefillError(tool, `Bitrefill ${tool} failed: ${text.slice(0, 500)}`, body);
+    return body;
+  }
+}
+
+/** A Base USDC payment requirement read from an x402 402 response. */
+export interface X402Quote {
+  method: "GET" | "POST";
+  amount: bigint;
+  payTo: Address;
+}
+
+interface Requirement {
+  scheme: string;
+  network: string;
+  asset: string;
+  payTo: string;
+  amount: string;
+}
+
+async function requirementsFrom(res: Response): Promise<Requirement[]> {
+  const header = res.headers.get("payment-required");
+  if (header) {
+    try {
+      return JSON.parse(Buffer.from(header, "base64").toString("utf8")).accepts ?? [];
+    } catch {}
+  }
+  try {
+    return ((await res.json()) as { accepts?: Requirement[] }).accepts ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function isBaseUsdc(r: Requirement, payTo: Address[]): boolean {
+  return (
+    r.scheme === "exact" &&
+    r.network === BASE_CAIP2 &&
+    isAddressEqual(r.asset as Address, USDC_BASE) &&
+    payTo.some((a) => isAddressEqual(r.payTo as Address, a))
   );
 }
 
-interface SIWxChallenge {
-  info: Record<string, unknown>;
-  supportedChains: { chainId: string; type: string }[];
-}
-
-/** Reads the SIWX challenge from a 402, from the JSON body or the payment-required header. */
-async function readChallenge(res: Response): Promise<SIWxChallenge> {
-  let body: { extensions?: Record<string, SIWxChallenge> } | undefined;
-  try {
-    body = await res.json();
-  } catch {}
-  let challenge = body?.extensions?.[SIWX];
-  const header = res.headers.get("payment-required");
-  if (!challenge && header) {
-    challenge = JSON.parse(Buffer.from(header, "base64").toString("utf8")).extensions?.[SIWX];
-  }
-  if (!challenge) throw new BitrefillError(res.status, undefined, undefined, "Expected a SIWX challenge.");
-  return challenge;
-}
-
-export class BitrefillClient {
-  private token?: { value: string; expiresAt: number };
+/**
+ * Pays Bitrefill invoices over x402 from the agent wallet. Payment is an EIP-3009
+ * authorization, so the agent needs USDC on Base but no ETH for gas.
+ */
+export class X402Payer {
   private readonly fetch: typeof globalThis.fetch;
-  private readonly baseUrl: string;
 
   constructor(
     private readonly account: LocalAccount,
-    options: { baseUrl?: string; fetch?: typeof globalThis.fetch } = {},
+    options: { fetch?: typeof globalThis.fetch } = {},
   ) {
-    this.baseUrl = options.baseUrl ?? BITREFILL_API;
     this.fetch = options.fetch ?? globalThis.fetch;
   }
 
-  /** Answers a 402 SIWX challenge for `url` by signing with the agent wallet, then retries. */
-  private async withSIWx(url: string, init: RequestInit): Promise<Response> {
-    const first = await this.fetch(url, init);
-    if (first.status !== 402) return first;
-    const challenge = await readChallenge(first);
-    const chain = challenge.supportedChains.find((c) => c.chainId === BASE_CAIP2);
-    if (!chain) throw new Error("Bitrefill SIWX challenge does not offer Base.");
-    const payload = await createSIWxPayload(
-      { ...challenge.info, chainId: chain.chainId, type: chain.type } as Parameters<
-        typeof createSIWxPayload
-      >[0],
-      this.account,
-      url,
-    );
-    return this.fetch(url, {
-      ...init,
-      headers: { ...(init.headers as Record<string, string>), [SIWX]: encodeSIWxHeader(payload) },
-    });
-  }
-
-  /** Mints a session token (~2h) that waives micro-fees on every route except invoice/pay. */
-  async connect(): Promise<void> {
-    const res = await this.withSIWx(`${this.baseUrl}/x402/connect`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
-    if (!res.ok) throw await errorFrom(res);
-    const { token, expires_in } = (await res.json()) as { token: string; expires_in?: number };
-    this.token = { value: token, expiresAt: Date.now() + ((expires_in ?? 7200) - 60) * 1000 };
-  }
-
-  private async authed<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
-    if (!this.token || Date.now() >= this.token.expiresAt) await this.connect();
-    const res = await this.fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        ...(init.headers as Record<string, string>),
-        "X-Access-Token": this.token!.value,
-      },
-    });
-    if ((res.status === 401 || res.status === 402) && !retried) {
-      this.token = undefined;
-      return this.authed(path, init, true);
+  /** Reads what `url` asks to be paid without paying it. */
+  async quote(url: string, allowedPayTo: Address[] = [BITREFILL_PAY_TO]): Promise<X402Quote> {
+    let method: X402Quote["method"] = "GET";
+    let res = await this.fetch(url, { method });
+    if (res.status === 404 || res.status === 405) {
+      method = "POST";
+      res = await this.fetch(url, { method, headers: { "content-type": "application/json" }, body: "{}" });
     }
-    if (!res.ok) throw await errorFrom(res);
-    return (await res.json()) as T;
+    if (res.status !== 402) {
+      throw new Error(`Expected a 402 payment request from ${url}, got ${res.status}.`);
+    }
+    const match = (await requirementsFrom(res)).find((r) => isBaseUsdc(r, allowedPayTo));
+    if (!match) throw new Error("Bitrefill did not offer a USDC-on-Base payment to its own address; refusing.");
+    return { method, amount: BigInt(match.amount), payTo: match.payTo as Address };
   }
 
-  search(query: string, country?: string): Promise<SearchResult> {
-    const params = new URLSearchParams({ q: query });
-    if (country) params.set("country", country);
-    return this.authed(`/x402/gift-cards/search?${params}`);
-  }
-
-  product(slug: string): Promise<ProductDetail> {
-    return this.authed(`/x402/products/detail?${new URLSearchParams({ slug })}`);
-  }
-
-  createInvoice(items: InvoiceItem[]): Promise<Invoice> {
-    return this.authed("/x402/invoice/create", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ items }),
-    });
-  }
-
-  /**
-   * Pays an invoice with an EIP-3009 authorization from the agent wallet. Only a
-   * requirement for exactly `expectedAmount` USDC on Base to Bitrefill is accepted.
-   */
-  async pay(invoiceId: string, expectedAmount: bigint): Promise<Record<string, unknown>> {
-    const usdc = NETWORKS.base.usdc;
+  /** Pays `url`, signing only a requirement that matches `quote` exactly. */
+  async pay(url: string, quote: X402Quote): Promise<Record<string, unknown>> {
     const payFetch = wrapFetchWithPaymentFromConfig(this.fetch, {
       schemes: [{ network: BASE_CAIP2, client: new ExactEvmScheme(this.account) }],
-      // The selector below pins the exact amount, which is a tighter bound than a USD cap.
+      // The selector pins asset, recipient and exact amount, a tighter bound than a USD cap.
       spendControls: false,
       paymentRequirementsSelector: (_version, requirements) => {
         const match = requirements.find(
-          (r) =>
-            r.scheme === "exact" &&
-            r.network === BASE_CAIP2 &&
-            isAddressEqual(r.asset as Address, usdc) &&
-            isAddressEqual(r.payTo as Address, BITREFILL_PAY_TO) &&
-            BigInt(r.amount) === expectedAmount,
+          (r) => isBaseUsdc(r as Requirement, [quote.payTo]) && BigInt(r.amount) === quote.amount,
         );
         if (!match) {
-          throw new Error(
-            `Bitrefill did not request exactly ${expectedAmount} atomic USDC on Base; refusing to pay.`,
-          );
+          throw new Error(`Bitrefill did not request exactly ${quote.amount} atomic USDC on Base; refusing to pay.`);
         }
         return match;
       },
     });
-    const res = await payFetch(`${this.baseUrl}/x402/invoice/pay`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ invoice_id: invoiceId }),
-    });
-    if (!res.ok) throw await errorFrom(res);
-    return (await res.json()) as Record<string, unknown>;
-  }
-
-  /**
-   * Invoice status. Redemption codes are only returned to the wallet that paid,
-   * so this signs a SIWX challenge for the exact status URL.
-   */
-  async status(invoiceId: string): Promise<InvoiceStatus> {
-    const url = `${this.baseUrl}/x402/invoice/status?${new URLSearchParams({ invoice_id: invoiceId })}`;
-    const res = await this.withSIWx(url, { method: "GET" });
-    if (!res.ok) throw await errorFrom(res);
-    return (await res.json()) as InvoiceStatus;
+    const res = await payFetch(
+      url,
+      quote.method === "GET"
+        ? { method: "GET" }
+        : { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    );
+    const text = await res.text();
+    if (!res.ok) throw new Error(`x402 payment failed (${res.status}): ${text.slice(0, 300)}`);
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { text };
+    }
   }
 }

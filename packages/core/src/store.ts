@@ -2,16 +2,17 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Address } from "viem";
-import type { NetworkName } from "./chain.js";
 import type { KeyFile } from "./keystore.js";
 import { DEFAULT_POLICY, type Policy, type SpendRecord } from "./policy.js";
-import type { SpendPermission } from "./spend.js";
 
 export interface MeiConfig {
-  network: NetworkName;
   rpcUrl?: string;
-  permission?: SpendPermission;
   policy: Policy;
+  /**
+   * Fields for Bitrefill's prepaid-card form: first_name and last_name at minimum,
+   * plus anything else the form asks for. Printed on the card as the cardholder.
+   */
+  cardholder?: Record<string, string>;
 }
 
 /** Redemption codes are never written here; they are re-fetched from Bitrefill on demand. */
@@ -22,7 +23,6 @@ export interface PurchaseRecord {
   packageValue: string;
   /** Atomic USDC units. */
   amount: string;
-  spendTxs: string[];
   status: "paid" | "failed";
   error?: string;
 }
@@ -88,9 +88,8 @@ export class Store {
       .map((line) => JSON.parse(line) as PurchaseRecord);
   }
 
+  /** Failed payments count too: an authorization may have gone through before the error. */
   spendHistory(): SpendRecord[] {
-    return this.purchases()
-      .filter((p) => p.status === "paid")
-      .map((p) => ({ at: p.at, amount: BigInt(p.amount) }));
+    return this.purchases().map((p) => ({ at: p.at, amount: BigInt(p.amount) }));
   }
 }
